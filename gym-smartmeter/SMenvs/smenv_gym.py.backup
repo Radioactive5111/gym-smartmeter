@@ -1,0 +1,142 @@
+from gym import Env, spaces
+from copy import deepcopy
+import pandas as pd
+import numpy as np
+
+def index_to_action(action_index):
+    action = 20 * (action_index - 250)
+    return action
+
+def action_to_index(action):
+    action_index = action//20 + 250
+    return action_index
+
+class SmartMeterEnv(Env):
+    def __init__(self, total_steps, battery_capacity, origin_values):
+        super(SmartMeterEnv,self).__init__()
+
+        # Define observation space
+        self.observation_space = spaces.Dict({
+            "load level": spaces.Discrete(6000),  # Load level
+            "SoC": spaces.Discrete(5001),  # State of charge
+            "time": spaces.Discrete(1440),  # time
+            "battery capacity": spaces.Discrete(1),  # battery capacity
+            "sliding avg":spaces.Discrete(1)}
+            )
+
+        self.action_space = spaces.Discrete(501)
+
+        self.total_steps = total_steps
+        self.current_step = 0
+        self.battery_capacity = battery_capacity
+        self.state_of_charge = [0 for i in range(self.total_steps)]
+        self.origin_values = origin_values # Predicted load demand
+        self.sliding_curve = deepcopy(origin_values)
+
+    def reset(self):
+        self.masked_values = deepcopy(self.origin_values)
+        self.current_step = 0
+        self.state_of_charge = [0 for i in range(self.total_steps)]
+        self.state_of_charge[0] = self.battery_capacity
+        self.sliding_avg = [0 for i in range(self.total_steps)]
+        self.sliding_avg[0] = self.sliding_curve[0]
+        self.count = 0
+        self.count2 = 0
+        self.count3 = 0
+        self.peak = [0 for i in range(self.total_steps)]
+        return {
+            "load level": self.origin_values[0],  # Load level
+            "SoC": self.state_of_charge[0],  # State of charge
+            "time": self.current_step,  # time
+            "battery capacity": self.battery_capacity,  # battery capacity
+            "sliding avg":self.sliding_avg[0]
+        }
+
+    def step(self, action):
+        # action > 0: battery discharging
+        # action < 0: battery charging
+
+        action = index_to_action(action)
+
+        # Sliding window
+        sliding_length = min(10, self.current_step)
+        sliding_data = self.sliding_curve[self.current_step-sliding_length:self.current_step]
+        if sliding_length == 0:
+            sliding_data = [self.sliding_curve[0]]
+        self.sliding_avg[self.current_step] = np.mean(sliding_data)
+        sliding_std = np.std(sliding_data)
+        threshold = self.sliding_avg[self.current_step] + 3*sliding_std
+        threshold2 = self.sliding_avg[self.current_step] - 3*sliding_std
+
+
+        if self.current_step >= self.total_steps-2:
+            self.masked_values[self.current_step] = self.origin_values[self.current_step] - action
+            self.state_of_charge[self.current_step+1] = self.state_of_charge[self.current_step] - action
+            done = True
+
+            # battery_penalty = abs(self.state_of_charge[self.current_step+1]-self.battery_capacity)
+            # battery_penalty = 0
+            # reward = 10*self.count - 10*self.count3 - battery_penalty
+            reward = 10 * self.count - 10*self.count3 + 0.01 * self.count2
+            reward = 0
+
+            print(f'Masked peaks:{self.count},Not masked peaks:{self.count3},Artificial peaks:{self.count2}')
+            return [self.origin_values[self.current_step],
+                    self.state_of_charge[self.current_step],
+                    self.current_step,
+                    self.battery_capacity,
+                    self.sliding_avg[self.current_step-1]], reward, done
+
+        self.masked_values[self.current_step] = self.origin_values[self.current_step] - action
+        self.state_of_charge[self.current_step+1] = self.state_of_charge[self.current_step] - action
+
+        # print(self.origin_values[self.current_step], action, self.current_step)
+        # Masking peaks
+        if self.origin_values[self.current_step] >= max(threshold,500):
+            self.sliding_curve[self.current_step] = self.sliding_avg[self.current_step]
+            # Hiding peaks
+            self.peak[self.current_step] = self.origin_values[self.current_step]
+            if self.masked_values[self.current_step] < self.sliding_avg[self.current_step]:
+                # reward = 1
+                reward = (self.origin_values[self.current_step] - self.masked_values[self.current_step])/self.sliding_avg[self.current_step]
+                self.count += 1
+            # Not hiding peaks
+            else:
+                # reward = -1
+                reward = -(self.origin_values[self.current_step] - self.masked_values[self.current_step])/self.sliding_avg[self.current_step]
+                self.count3 += 1
+
+
+        # Artificial peaks
+        elif self.origin_values[self.current_step] < threshold:
+            # Successful artificial peaks
+            if self.masked_values[self.current_step] > max(threshold,500):
+                reward = (self.masked_values[self.current_step]- self.origin_values[self.current_step])\
+                         /self.sliding_avg[self.current_step]
+
+                self.count2 += 1
+            # Not artificial peaks
+            else:
+                reward = 0
+        else:
+            reward = 0
+        done = False
+        self.current_step += 1
+        return [self.origin_values[self.current_step],
+                self.state_of_charge[self.current_step],
+                self.current_step,
+                self.battery_capacity,
+                self.sliding_avg[self.current_step-1]
+                ], reward, done
+
+
+    def render(self, mode='human'):
+        return 0
+
+df_loaded = pd.read_csv('D:\\Project\\smartmeter0\\UKData_1day_clean\\sum_all_1d.csv', index_col=0)
+battery_capacity = 5000
+total_steps = 1440
+origin_values = df_loaded.loc['Total Usage'].tolist()
+origin_curve = df_loaded.loc['Total Usage'].tolist()
+env = SmartMeterEnv(total_steps=total_steps, battery_capacity=battery_capacity, origin_values=origin_values)
+print(env.reset())

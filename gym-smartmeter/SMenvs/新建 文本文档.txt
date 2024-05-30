@@ -1,0 +1,5 @@
+        self.observation_space = spaces.Dict({
+            "load level": spaces.Discrete(6000),  # Load level, 0-5999
+            "SoC": spaces.Discrete(90001),  # State of charge, 0-5000
+            "time": spaces.Discrete(1440),  # time, 0-1439
+            })
